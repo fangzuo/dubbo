@@ -184,9 +184,18 @@ public class ExtensionLoader<T> {
 
     /**
      * 根据values和group获取带有@Activate注解的扩展点实例
+     * group和url参数筛选是 and关系
+     * group和value参数筛选没有任何and、or关系
+     *
+     * group筛选:匹配所有注解中group与其相等的扩展点,如果你传入的group=null则匹配所有@Activate
+     * url参数筛选:url中的参数名(该参数对应的参数值必须有值才会参与匹配)去匹配所有注解中的value值,相等则匹配成功，如果注解中value值为null也会被匹配成功
+     * value筛选：返回扩展点实例
+     * group与url是and关系
+     * value与（group、url）是互补关系,最终返回的结果的两者的并集
+     *
      * Get activate extensions.
      * @param url    url
-     * @param values extension point names
+     * @param values extension point names 这里的name 要么为null,要么是扩展点的name值否则会抛异常
      * @param group  group
      * @return extension list which are activated
      * @see com.alibaba.dubbo.common.extension.Activate
@@ -200,17 +209,19 @@ public class ExtensionLoader<T> {
             getExtensionClasses();
             //遍历带有@Activate注解的扩展实现类
             for (Map.Entry<String, Activate> entry : cachedActivates.entrySet()) {
+                //这里的name是扩展点的名字，即dubbo扩展文件中的key
                 String name = entry.getKey();
                 Activate activate = entry.getValue();
                 //如果该扩展点上的@Activate注解中的group没有设置值或者设置了值和传入的group参数一样，则进入if()
                 if (isMatchGroup(group, activate.group())) {
                     //获取这个扩展点的实例,也许返回的是wrapper，比如是获取protocol的扩展点实例，那么这里返回的是ProtocolListenerWrapper
                     T ext = getExtension(name);
-                    //names中不包含name
+                    //names中不包含扩展点中的实例名
                     if (!names.contains(name)
                             //names中不包含“-default”
                             && !names.contains(Constants.REMOVE_VALUE_PREFIX + name)
-                            //通过URL判断这个activate注解是激活的
+                            //@Activate中的value其实只会与url中的参数比较
+                            //判断url中的参数的kay值与@Activate中的value是否匹配
                             && isActive(activate, url)) {
                         //增加扩展
                         exts.add(ext);
@@ -249,6 +260,12 @@ public class ExtensionLoader<T> {
         return exts;
     }
 
+    /**
+     * 只要group与@Activate中group的值任意一个值相同，即返回true
+     * @param group 待匹配值
+     * @param groups @Activate中group的值
+     * @return
+     */
     private boolean isMatchGroup(String group, String[] groups) {
         if (group == null || group.length() == 0) {
             return true;
