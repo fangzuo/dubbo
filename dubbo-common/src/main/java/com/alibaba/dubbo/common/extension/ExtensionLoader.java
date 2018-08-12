@@ -52,9 +52,9 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * @see <a href="http://java.sun.com/j2se/1.5.0/docs/guide/jar/jar.html#Service%20Provider">Service Provider in Java 5</a>
- * @see com.alibaba.dubbo.common.extension.SPI
- * @see com.alibaba.dubbo.common.extension.Adaptive
- * @see com.alibaba.dubbo.common.extension.Activate
+ * @see com.alibaba.dubbo.common.extension.SPI 作用在接口上
+ * @see com.alibaba.dubbo.common.extension.Adaptive 作用在实现类或者接口的方法上
+ * @see com.alibaba.dubbo.common.extension.Activate 作用在扩展点的实现类上
  */
 public class ExtensionLoader<T> {
 
@@ -165,6 +165,8 @@ public class ExtensionLoader<T> {
     }
 
     /**
+     * 根据url中key对应的value和group筛选带有@Activate注解的扩展实现类
+     * 注解@Activate(value,group)参数
      * This is equivalent to {@code getActivateExtension(url, url.getParameter(key).split(","), null)}
      *
      * @param url   url
@@ -174,13 +176,15 @@ public class ExtensionLoader<T> {
      * @see #getActivateExtension(com.alibaba.dubbo.common.URL, String[], String)
      */
     public List<T> getActivateExtension(URL url, String key, String group) {
+        //获取url中key对应的value
         String value = url.getParameter(key);
+        //如果value为null，则传入null，否则传入value，可以传入多个value，数组表示
         return getActivateExtension(url, value == null || value.length() == 0 ? null : Constants.COMMA_SPLIT_PATTERN.split(value), group);
     }
 
     /**
+     * 根据values和group获取带有@Activate注解的扩展点实例
      * Get activate extensions.
-     *
      * @param url    url
      * @param values extension point names
      * @param group  group
@@ -190,22 +194,39 @@ public class ExtensionLoader<T> {
     public List<T> getActivateExtension(URL url, String[] values, String group) {
         List<T> exts = new ArrayList<T>();
         List<String> names = values == null ? new ArrayList<String>(0) : Arrays.asList(values);
+        //url中的key对应的值不包含“-default“”
         if (!names.contains(Constants.REMOVE_VALUE_PREFIX + Constants.DEFAULT_KEY)) {
+            //加载dubbo的扩展文件/META-INF/dubbo/internal/
             getExtensionClasses();
+            //遍历带有@Activate注解的扩展实现类
             for (Map.Entry<String, Activate> entry : cachedActivates.entrySet()) {
                 String name = entry.getKey();
                 Activate activate = entry.getValue();
+                //如果该扩展点上的@Activate注解中的group没有设置值或者设置了值和传入的group参数一样，则进入if()
                 if (isMatchGroup(group, activate.group())) {
+                    //获取这个扩展点的实例,也许返回的是wrapper，比如是获取protocol的扩展点实例，那么这里返回的是ProtocolListenerWrapper
                     T ext = getExtension(name);
+                    //names中不包含name
                     if (!names.contains(name)
+                            //names中不包含“-default”
                             && !names.contains(Constants.REMOVE_VALUE_PREFIX + name)
+                            //通过URL判断这个activate注解是激活的
                             && isActive(activate, url)) {
+                        //增加扩展
                         exts.add(ext);
                     }
                 }
             }
+            //按照Activate的方式进行排序，注意order
             Collections.sort(exts, ActivateComparator.COMPARATOR);
         }
+        /**
+         * 借用usrs这个临时变量，进行循环往exts中塞具体的ext的对象。
+         * 如果碰到了"default"就添加到头部，清空usrs这个临时变量。
+         * 如果没有"default"那么usrs不会清空，所以下面有个if，说usrs不为空
+         * 将里面的内容增加到exts中
+         * 其实意思是如果出现@Activate(value="default")，含有value=“default” 则仅返回该扩展点实例，否则返回通过name匹配查到的实例
+         */
         List<T> usrs = new ArrayList<T>();
         for (int i = 0; i < names.size(); i++) {
             String name = names.get(i);
@@ -242,6 +263,12 @@ public class ExtensionLoader<T> {
         return false;
     }
 
+    /**
+     * 判断这个url是否匹配activate，即这个url是否能被激活
+     * @param activate
+     * @param url
+     * @return
+     */
     private boolean isActive(Activate activate, URL url) {
         String[] keys = activate.value();
         if (keys == null || keys.length == 0) {
@@ -487,6 +514,12 @@ public class ExtensionLoader<T> {
         return new IllegalStateException(buf.toString());
     }
 
+    /**
+     * 根据name返回扩展类实例，但如果有某个wrapper类的构造方法的入参是该类型，则返回该wrapper
+     * 比如:ProtocolFilterWrapper、ProtocolListenerWrapper
+     * @param name
+     * @return
+     */
     @SuppressWarnings("unchecked")
     private T createExtension(String name) {
         Class<?> clazz = getExtensionClasses().get(name);
@@ -499,10 +532,12 @@ public class ExtensionLoader<T> {
                 EXTENSION_INSTANCES.putIfAbsent(clazz, (T) clazz.newInstance());
                 instance = (T) EXTENSION_INSTANCES.get(clazz);
             }
+            //如果这个类中依赖其他扩展点实例，那么通过set方法注入
             injectExtension(instance);
             Set<Class<?>> wrapperClasses = cachedWrapperClasses;
             if (wrapperClasses != null && !wrapperClasses.isEmpty()) {
                 for (Class<?> wrapperClass : wrapperClasses) {
+                    //aop功能
                     instance = injectExtension((T) wrapperClass.getConstructor(type).newInstance(instance));
                 }
             }
@@ -523,8 +558,10 @@ public class ExtensionLoader<T> {
                         Class<?> pt = method.getParameterTypes()[0];
                         try {
                             String property = method.getName().length() > 3 ? method.getName().substring(3, 4).toLowerCase() + method.getName().substring(4) : "";
+                            //这里需要关注下，因为dubbo中的扩展点依赖的对象可能是dubbo扩展点、spring 中的bean对象，所以需要objectFactory来获取
                             Object object = objectFactory.getExtension(pt, property);
                             if (object != null) {
+                                //执行set方法注入属性
                                 method.invoke(instance, object);
                             }
                         } catch (Exception e) {
@@ -587,6 +624,15 @@ public class ExtensionLoader<T> {
         return extensionClasses;
     }
 
+    /**
+     * extensionClasses
+     * cachedAdaptiveClass
+     * cachedWrapperClasses
+     * cachedActivates
+     * cachedNames
+     * @param extensionClasses
+     * @param dir
+     */
     private void loadFile(Map<String, Class<?>> extensionClasses, String dir) {
         String fileName = dir + type.getName();
         try {
@@ -646,8 +692,9 @@ public class ExtensionLoader<T> {
                                                     }
                                                     wrappers.add(clazz);
                                                 } catch (NoSuchMethodException e) {
-                                                    //如果构造方法中不存在
+                                                    //如果构造方法中不存在参数是扩展点类型的，肯定都抛异常，执行下面代码
                                                     clazz.getConstructor();
+                                                    //下面这段代过时了，跳过(name肯定不为null，即k-v中K的值)
                                                     if (name == null || name.length() == 0) {
                                                         name = findAnnotationName(clazz);
                                                         if (name == null || name.length() == 0) {
@@ -661,6 +708,7 @@ public class ExtensionLoader<T> {
                                                     }
                                                     String[] names = NAME_SEPARATOR.split(name);
                                                     if (names != null && names.length > 0) {
+                                                        //缓存带有@Activate类的实例
                                                         Activate activate = clazz.getAnnotation(Activate.class);
                                                         if (activate != null) {
                                                             cachedActivates.put(names[0], activate);
@@ -712,6 +760,7 @@ public class ExtensionLoader<T> {
             return name.toLowerCase();
         }
         return extension.value();
+
     }
 
     @SuppressWarnings("unchecked")
@@ -726,15 +775,19 @@ public class ExtensionLoader<T> {
 
     private Class<?> getAdaptiveExtensionClass() {
         getExtensionClasses();
+        //如果缓存中存在这个类实例，则直接返回，这也说明如果一个扩展点的实例类中要是有@Adaptive注解。那么getAdaptiveExtension()返回带有@Adaptive注解类的实例对象
         if (cachedAdaptiveClass != null) {
             return cachedAdaptiveClass;
         }
+        //否则就动态创建
         return cachedAdaptiveClass = createAdaptiveExtensionClass();
     }
 
     private Class<?> createAdaptiveExtensionClass() {
+        //自己拼接java类文件的code，然后使用默认的编译工具javassist编译
         String code = createAdaptiveExtensionClassCode();
         ClassLoader classLoader = findClassLoader();
+        //这里返回的是AdaptiveCompiler，没有指定编译类，默认使用javassist
         com.alibaba.dubbo.common.compiler.Compiler compiler = ExtensionLoader.getExtensionLoader(com.alibaba.dubbo.common.compiler.Compiler.class).getAdaptiveExtension();
         return compiler.compile(code, classLoader);
     }
